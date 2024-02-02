@@ -108,7 +108,7 @@ func (p *PUSlurmMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
 				if val.MigProfile != "" {
 					gpuIDtemp = FindMIGUUID(sysInfo, val.GPU, val.GPUInstanceID)
 				} else {
-					gpuIDtemp = val.GPU
+					gpuIDtemp = val.GPUUUID
 				}
 				jobId, userId = CollectJobInfo(stateDir, gpuIDtemp)
 				jobIds[gpuID] = jobId

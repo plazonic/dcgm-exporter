@@ -192,7 +192,7 @@ and append (comma separated) new metric name, its description and multiplier, e.
 DCGM_FI_DEV_FB_TOTAL, gauge, Frame buffer memory total (in MB)., nvidia_gpu_memory_total_bytes, Total memory of the GPU device in bytes, 1048576
 ```
 ### Collect slurm jobid and user running on the particular GPU
-This feature relies on the existence of /run/gpustat/GPU# (say /run/gpustat/1 for GPU#1) or /run/gpustat/MIG-UUID (say /run/gpustat/MIG-2201f4b1-a001-5ae1-87df-c6ef1d8adfab) containing space separated jobid and uidnumber, e.g.:
+This feature relies on the existence of /run/gpustat/GPU-UUID (say /run/gpustat/GPU-8b4054a4-c830-20d4-1111-222222222222) or /run/gpustat/MIG-UUID (say /run/gpustat/MIG-2201f4b1-a001-5ae1-87df-c6ef1d8adfab) containing space separated jobid and uidnumber, e.g.:
 ```
 [root@della-l01g2 ~]# cat /run/gpustat/MIG-2201f4b1-a001-5ae1-87df-c6ef1d8adfab
 51234567 123456
