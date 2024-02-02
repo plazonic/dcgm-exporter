@@ -19,6 +19,10 @@ package dcgmexporter
 import (
 	"fmt"
 	"math/rand"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
 	"github.com/bits-and-blooms/bitset"
@@ -52,6 +56,7 @@ type GPUInstanceInfo struct {
 	ProfileName      string
 	EntityId         uint
 	ComputeInstances []ComputeInstanceInfo
+	UUID             string
 }
 
 type GPUInfo struct {
@@ -413,12 +418,76 @@ func InitializeGPUInfo(sysInfo SystemInfo, gOpt DeviceOptions, useFakeGPUs bool)
 		if err != nil {
 			return sysInfo, err
 		}
+
+	}
+
+	// detect MIG UUIDs and add them
+	err = CollectMIGUUIDs(&sysInfo)
+	if err != nil {
+		return sysInfo, err
 	}
 
 	sysInfo.gOpt = gOpt
 	err = VerifyDevicePresence(&sysInfo, gOpt)
 
 	return sysInfo, err
+}
+
+func CollectMIGUUIDs(sysInfo *SystemInfo) error {
+	nsmi := exec.Command("/usr/bin/nvidia-smi", "-L")
+	output, err := nsmi.CombinedOutput()
+	if err != nil {
+		return err
+	}
+
+	// GPU 0: NVIDIA A100 80GB PCIe (UUID: GPU-d6dd33b9-e50e-997c-f303-c8f7312fa498)
+	//  MIG 1g.10gb     Device  0: (UUID: MIG-da198618-61fd-5018-bc74-f324c3259dbf)
+	currentGpu := -1
+	gpuid := uint(0)
+	gpuuuid := ""
+	reg := regexp.MustCompile(` ([0-9]+):.*(MIG|GPU)-([^)]+)\)`)
+	for n, line := range strings.Split(string(output), "\n") {
+		result := reg.FindStringSubmatch(line)
+		if len(result) == 4 {
+			gpuidtemp, _ := strconv.ParseUint(result[1], 10, 32)
+			gpuid = uint(gpuidtemp)
+			gpuuuid = result[2] + "-" + result[3]
+			if result[2] == "GPU" {
+				currentGpu = -1
+				for i := uint(0); i < sysInfo.GPUCount; i++ {
+					if sysInfo.GPUs[i].DeviceInfo.UUID == gpuuuid {
+						currentGpu = int(i)
+					}
+				}
+				if currentGpu == -1 {
+					return fmt.Errorf("Failed to find GPU with id %d and UUID %s", gpuid, gpuuuid)
+				}
+			} else if result[2] == "MIG" {
+				if currentGpu == -1 {
+					return fmt.Errorf("Found a MIG card with id %d and UUID %s but no previous GPU", gpuid, gpuuuid)
+				}
+				if int(gpuid) < len(sysInfo.GPUs[currentGpu].GPUInstances) {
+					sysInfo.GPUs[currentGpu].GPUInstances[gpuid].UUID = gpuuuid
+				} else {
+					return fmt.Errorf("Found a MIG card (%s) with id %d but the GPU %d (%s) only has %d MIGs", gpuuuid, gpuid, currentGpu, sysInfo.GPUs[currentGpu].DeviceInfo.UUID, len(sysInfo.GPUs[currentGpu].GPUInstances))
+				}
+			}
+		} else {
+			if len(line) > 1 {
+				logrus.Warnf("Unexpectedly formatted output from nvidia-smi, line %d: %s", n, line)
+			}
+		}
+	}
+	for i := uint(0); i < sysInfo.GPUCount; i++ {
+		logrus.Infof("GPU #%d, UUID %s", i, sysInfo.GPUs[i].DeviceInfo.UUID)
+		for j := uint(0); int(j) < len(sysInfo.GPUs[i].GPUInstances); j++ {
+			logrus.Infof("  MIG #%d, InstanceID %d, UUID %s, Profile %s", j, sysInfo.GPUs[i].GPUInstances[j].Info.NvmlInstanceId, sysInfo.GPUs[i].GPUInstances[j].UUID, sysInfo.GPUs[i].GPUInstances[j].ProfileName)
+			for k := uint(0); int(k) < len(sysInfo.GPUs[i].GPUInstances[j].ComputeInstances); k++ {
+				logrus.Infof("    computeinstance #%d, InstanceID %d, Profile %s", k, sysInfo.GPUs[i].GPUInstances[j].ComputeInstances[k].EntityId, sysInfo.GPUs[i].GPUInstances[j].ComputeInstances[k].ProfileName)
+			}
+		}
+	}
+	return err
 }
 
 func InitializeSystemInfo(gOpt DeviceOptions, sOpt DeviceOptions, cOpt DeviceOptions, useFakeGPUs bool, entityType dcgm.Field_Entity_Group) (SystemInfo, error) {

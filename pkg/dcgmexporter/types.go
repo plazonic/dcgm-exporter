@@ -113,15 +113,19 @@ type DCGMCollector struct {
 }
 
 type Counter struct {
-	FieldID   dcgm.Short
-	FieldName string
-	PromType  string
-	Help      string
+	FieldID        dcgm.Short
+	FieldName      string
+	PromType       string
+	Help           string
+	AlterFieldName string
+	AlterHelp      string
+	Multiplier     int
 }
 
 type Metric struct {
 	Counter *Counter
-	Value   string
+	Value      string
+	AlterValue string
 
 	GPU          string
 	GPUUUID      string
@@ -177,4 +181,8 @@ type PodInfo struct {
 	Name      string
 	Namespace string
 	Container string
+}
+
+type PUSlurmMapper struct {
+	Config *Config
 }

@@ -79,6 +79,13 @@ func NewMetricsPipeline(c *Config, newDCGMCollector DCGMCollectorConstructor) (*
 		}
 	}
 
+	puMapper, err := NewPUSlurmMapper(c)
+	if err != nil {
+		logrus.Warnf("Could not load PUSlurmMapper: %v", err)
+	} else {
+		transformations = append(transformations, puMapper)
+	}
+
 	return &MetricsPipeline{
 			config: c,
 
@@ -175,6 +182,8 @@ func (m *MetricsPipeline) run() (string, error) {
 			return "", fmt.Errorf("Failed to format metrics with error: %v", err)
 		}
 	}
+
+	formatted += FormatSlurmInfo(metrics)
 
 	if m.switchCollector != nil {
 		/* Collect Switch Metrics */
@@ -274,6 +283,22 @@ var migMetricsFormat = `
 
 } {{ $metric.Value -}}
 {{- end }}
+{{- if $counter.AlterFieldName }}
+# HELP {{ $counter.AlterFieldName }} {{ $counter.AlterHelp }}
+# TYPE {{ $counter.AlterFieldName }} {{ $counter.PromType }}
+{{- range $metric := $metrics }}
+{{ $counter.AlterFieldName }}{minor_number="{{ $metric.GPU }}",uuid="{{ $metric.GPUUUID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
+
+{{- range $k, $v := $metric.Labels -}}
+        ,{{ $k }}="{{ $v }}"
+{{- end -}}
+{{- range $k, $v := $metric.Attributes -}}
+        ,{{ $k }}="{{ $v }}"
+{{- end -}}
+
+} {{ $metric.AlterValue -}}
+{{- end }}
+{{- end }}
 {{ end }}`
 
 var switchMetricsFormat = `
@@ -349,4 +374,37 @@ func FormatMetrics(t *template.Template, m [][]Metric) (string, error) {
 	}
 
 	return res.String(), nil
+}
+
+func FormatSlurmInfo(m [][]Metric) string {
+	strJobId := `# HELP nvidia_gpu_jobId JobId number of a job currently using this GPU as reported by Slurm
+# TYPE nvidia_gpu_jobId gauge
+`
+	strUserId := `# HELP nvidia_gpu_jobUid Uid number of user running jobs on this GPU
+# TYPE nvidia_gpu_jobUid gauge
+`
+	for _, deviceMetrics := range m {
+		jobId := "0"
+		userId := "0"
+		props := ""
+		for _, deviceMetric := range deviceMetrics {
+			if props == "" {
+				props = fmt.Sprintf("{minor_number=\"%s\",name=\"%s\",uuid=\"%s\"} ", deviceMetric.GPU, deviceMetric.GPUModelName, deviceMetric.GPUUUID)
+			}
+			for k, v := range deviceMetric.Attributes {
+				if k == "jobid" {
+					jobId = v
+				}
+				if k == "userid" {
+					userId = v
+				}
+			}
+			if (jobId != "0") && (userId != "0") {
+				break
+			}
+		}
+		strJobId += "nvidia_gpu_jobId" + props + jobId + "\n"
+		strUserId += "nvidia_gpu_jobUid" + props + userId + "\n"
+	}
+	return strJobId + strUserId
 }

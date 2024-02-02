@@ -21,6 +21,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
@@ -83,6 +84,7 @@ func ReadCSVFile(filename string) ([][]string, error) {
 
 	r := csv.NewReader(file)
 	r.Comment = '#'
+	r.FieldsPerRecord = -1 // Allow variable number of fields
 	records, err := r.ReadAll()
 
 	return records, err
@@ -93,6 +95,10 @@ func extractCounters(records [][]string, c *Config) ([]Counter, error) {
 
 	for i, record := range records {
 		var useOld = false
+		var alterField, alterHelp string
+		var multiplier int
+		var err error
+
 		if len(record) == 0 {
 			continue
 		}
@@ -101,8 +107,21 @@ func extractCounters(records [][]string, c *Config) ([]Counter, error) {
 			record[j] = strings.Trim(r, " ")
 		}
 
-		if len(record) != 3 {
+		// Local PU addition - for fields with alternate metric name and possibly a multiplier
+		// expects alter_metric_name,alter_descriptoin,multiplier
+		if len(record) == 6 {
+			alterField = record[3]
+			alterHelp = record[4]
+			multiplier, err = strconv.Atoi(record[5])
+			if err != nil {
+				return nil, fmt.Errorf("Malformed CSV record, failed to parse line %d (`%v`), 6th field is not an integer", i, record)
+			}
+		} else if len(record) != 3 {
 			return nil, fmt.Errorf("Malformed CSV record, failed to parse line %d (`%v`), expected 3 fields", i, record)
+		} else {
+			alterField = ""
+			alterHelp = ""
+			multiplier = 1
 		}
 
 		fieldID, ok := dcgm.DCGM_FI[record[0]]
@@ -125,7 +144,7 @@ func extractCounters(records [][]string, c *Config) ([]Counter, error) {
 				return nil, fmt.Errorf("Could not find Prometheus metric type %s", record[1])
 			}
 
-			f = append(f, Counter{fieldID, record[0], record[1], record[2]})
+			f = append(f, Counter{fieldID, record[0], record[1], record[2], alterField, alterHelp, multiplier})
 		} else {
 			if !fieldIsSupported(uint(oldFieldID), c) {
 				logrus.Warnf("Skipping line %d ('%s'): metric not enabled", i, record[0])
@@ -136,7 +155,7 @@ func extractCounters(records [][]string, c *Config) ([]Counter, error) {
 				return nil, fmt.Errorf("Could not find Prometheus metric type %s", record[1])
 			}
 
-			f = append(f, Counter{oldFieldID, record[0], record[1], record[2]})
+			f = append(f, Counter{oldFieldID, record[0], record[1], record[2], alterField, alterHelp, multiplier})
 
 		}
 	}
