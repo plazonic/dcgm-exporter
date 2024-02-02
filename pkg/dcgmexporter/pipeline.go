@@ -287,7 +287,7 @@ var migMetricsFormat = `
 # HELP {{ $counter.AlterFieldName }} {{ $counter.AlterHelp }}
 # TYPE {{ $counter.AlterFieldName }} {{ $counter.PromType }}
 {{- range $metric := $metrics }}
-{{ $counter.AlterFieldName }}{minor_number="{{ $metric.GPU }}",uuid="{{ $metric.GPUUUID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
+{{ $counter.AlterFieldName }}{minor_number="{{ $metric.GPU }}",uuid="{{ $metric.AlterUUID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
 
 {{- range $k, $v := $metric.Labels -}}
         ,{{ $k }}="{{ $v }}"
@@ -389,7 +389,7 @@ func FormatSlurmInfo(m [][]Metric) string {
 		props := ""
 		for _, deviceMetric := range deviceMetrics {
 			if props == "" {
-				props = fmt.Sprintf("{minor_number=\"%s\",name=\"%s\",uuid=\"%s\"} ", deviceMetric.GPU, deviceMetric.GPUModelName, deviceMetric.GPUUUID)
+				props = fmt.Sprintf("{minor_number=\"%s\",name=\"%s\",uuid=\"%s\"} ", deviceMetric.GPU, deviceMetric.GPUModelName, deviceMetric.AlterUUID)
 			}
 			for k, v := range deviceMetric.Attributes {
 				if k == "jobid" {

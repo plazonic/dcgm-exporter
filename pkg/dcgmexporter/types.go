@@ -123,9 +123,10 @@ type Counter struct {
 }
 
 type Metric struct {
-	Counter *Counter
+	Counter    *Counter
 	Value      string
 	AlterValue string
+	AlterUUID  string
 
 	GPU          string
 	GPUUUID      string

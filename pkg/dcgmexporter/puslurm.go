@@ -71,6 +71,8 @@ func (p *PUSlurmMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
 	jobIds := make(map[string]string)
 	// e.g. userIds[1] = 221290, for GPU#1, no MIG, owned by userid "221290"
 	userIds := make(map[string]string)
+	// used to find GPU UUIDs from GPU and GPUInstanceID, either GPU-* or MIG-*
+	gpuUUIDs := make(map[string]string)
 
 	// calculate AlterValue
 	for i, device := range metrics {
@@ -99,18 +101,22 @@ func (p *PUSlurmMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
 			} else {
 				gpuID = val.GPU
 			}
+			// for convenience populate UUIDs
+			if _, ok = gpuUUIDs[gpuID]; !ok {
+				if val.MigProfile != "" {
+					gpuUUIDs[gpuID] = FindMIGUUID(sysInfo, val.GPU, val.GPUInstanceID)
+				} else {
+					gpuUUIDs[gpuID] = val.GPUUUID
+				}
+			}
+			// We will use this to output MIG uuids for our metrics
+			metrics[i][j].AlterUUID = gpuUUIDs[gpuID]
 			jobId, ok = jobIds[gpuID]
 			if ok {
 				userId, _ = userIds[gpuID]
 			} else {
 				// First time checking for this combo
-				var gpuIDtemp string
-				if val.MigProfile != "" {
-					gpuIDtemp = FindMIGUUID(sysInfo, val.GPU, val.GPUInstanceID)
-				} else {
-					gpuIDtemp = val.GPUUUID
-				}
-				jobId, userId = CollectJobInfo(stateDir, gpuIDtemp)
+				jobId, userId = CollectJobInfo(stateDir, gpuUUIDs[gpuID])
 				jobIds[gpuID] = jobId
 				userIds[gpuID] = userId
 			}
