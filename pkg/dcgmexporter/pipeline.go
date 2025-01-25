@@ -19,6 +19,7 @@ package dcgmexporter
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -27,67 +28,82 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func NewMetricsPipeline(c *Config, newDCGMCollector DCGMCollectorConstructor) (*MetricsPipeline, func(), error) {
-	counters, err := ExtractCounters(c)
-	if err != nil {
-		return nil, func() {}, err
-	}
+func NewMetricsPipeline(config *Config,
+	counters []Counter,
+	hostname string,
+	newDCGMCollector DCGMCollectorConstructor,
+	fieldEntityGroupTypeSystemInfo *FieldEntityGroupTypeSystemInfo,
+) (*MetricsPipeline, func(), error) {
+	logrus.WithField(LoggerDumpKey, fmt.Sprintf("%+v", counters)).Debug("Counters are initialized")
 
 	cleanups := []func(){}
-	gpuCollector, cleanup, err := newDCGMCollector(counters, c, dcgm.FE_GPU)
-	if err != nil {
-		logrus.Info("Not collecting gpu metrics: ", err)
-	} else {
-		cleanups = append(cleanups, cleanup)
-	}
 
-	switchCollector, cleanup, err := newDCGMCollector(counters, c, dcgm.FE_SWITCH)
-	if err != nil {
-		logrus.Info("Not collecting switch metrics: ", err)
-	} else {
-		cleanups = append(cleanups, cleanup)
-	}
+	var (
+		gpuCollector    *DCGMCollector
+		switchCollector *DCGMCollector
+		linkCollector   *DCGMCollector
+		cpuCollector    *DCGMCollector
+		coreCollector   *DCGMCollector
+		err             error
+	)
 
-	linkCollector, cleanup, err := newDCGMCollector(counters, c, dcgm.FE_LINK)
-	if err != nil {
-		logrus.Info("Not collecting link metrics: ", err)
-	} else {
-		cleanups = append(cleanups, cleanup)
-	}
-
-	cpuCollector, cleanup, err := newDCGMCollector(counters, c, dcgm.FE_CPU)
-	if err != nil {
-		logrus.Info("Not collecting cpu metrics: ", err)
-	} else {
-		cleanups = append(cleanups, cleanup)
-	}
-
-	coreCollector, cleanup, err := newDCGMCollector(counters, c, dcgm.FE_CPU_CORE)
-	if err != nil {
-		logrus.Info("Not collecting cpu core metrics: ", err)
-	} else {
-		cleanups = append(cleanups, cleanup)
-	}
-
-	transformations := []Transform{}
-	if c.Kubernetes {
-		podMapper, err := NewPodMapper(c)
+	if item, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_GPU); exists {
+		var cleanup func()
+		gpuCollector, cleanup, err = newDCGMCollector(counters, hostname, config, item)
 		if err != nil {
-			logrus.Warnf("Could not enable kubernetes metric collection: %v", err)
-		} else {
-			transformations = append(transformations, podMapper)
+			logrus.Warn("Cannot create DCGMCollector for dcgm.FE_GPU")
 		}
+		cleanups = append(cleanups, cleanup)
 	}
 
-	puMapper, err := NewPUSlurmMapper(c)
+	if item, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_SWITCH); exists {
+		var cleanup func()
+		switchCollector, cleanup, err = newDCGMCollector(counters, hostname, config, item)
+		if err != nil {
+			logrus.Warn("Cannot create DCGMCollector for dcgm.FE_SWITCH")
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+
+	if item, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_LINK); exists {
+		var cleanup func()
+		linkCollector, cleanup, err = newDCGMCollector(counters, hostname, config, item)
+		if err != nil {
+			logrus.Warn("Cannot create DCGMCollector for dcgm.FE_LINK")
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+
+	if item, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_CPU); exists {
+		var cleanup func()
+		cpuCollector, cleanup, err = newDCGMCollector(counters, hostname, config, item)
+		if err != nil {
+			logrus.Warn("Cannot create DCGMCollector for dcgm.FE_CPU")
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+
+	if item, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_CPU_CORE); exists {
+		var cleanup func()
+		coreCollector, cleanup, err = newDCGMCollector(counters, hostname, config, item)
+		if err != nil {
+			logrus.Warn("Cannot create DCGMCollector for dcgm.FE_CPU_CORE")
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+
+	transformations := getTransformations(config)
+
+	puMapper, err := NewPUSlurmMapper(config)
 	if err != nil {
 		logrus.Warnf("Could not load PUSlurmMapper: %v", err)
 	} else {
 		transformations = append(transformations, puMapper)
+
 	}
 
 	return &MetricsPipeline{
-			config: c,
+			config: config,
 
 			migMetricsFormat:     template.Must(template.New("migMetrics").Parse(migMetricsFormat)),
 			switchMetricsFormat:  template.Must(template.New("switchMetrics").Parse(switchMetricsFormat)),
@@ -107,6 +123,25 @@ func NewMetricsPipeline(c *Config, newDCGMCollector DCGMCollectorConstructor) (*
 				cleanup()
 			}
 		}, nil
+}
+
+func getTransformations(c *Config) []Transform {
+	transformations := []Transform{}
+	if c.Kubernetes {
+		podMapper, err := NewPodMapper(c)
+		if err != nil {
+			logrus.Warnf("Could not enable kubernetes metric collection: %v", err)
+		} else {
+			transformations = append(transformations, podMapper)
+		}
+	}
+
+	if c.HPCJobMappingDir != "" {
+		hpcMapper := newHPCMapper(c)
+		transformations = append(transformations, hpcMapper)
+	}
+
+	return transformations
 }
 
 // Primarely for testing, caller expected to cleanup the collector
@@ -143,14 +178,14 @@ func (m *MetricsPipeline) Run(out chan string, stop chan interface{}, wg *sync.W
 		case <-t.C:
 			o, err := m.run()
 			if err != nil {
-				logrus.Errorf("Failed to collect metrics with error: %v", err)
+				logrus.Errorf("Failed to collect metrics; err: %v", err)
 				/* flush output rather than output stale data */
 				out <- ""
 				continue
 			}
 
 			if len(out) == cap(out) {
-				logrus.Errorf("Channel is full skipping")
+				logrus.Errorf("Channel is full skipping.")
 			} else {
 				out <- o
 			}
@@ -159,7 +194,7 @@ func (m *MetricsPipeline) Run(out chan string, stop chan interface{}, wg *sync.W
 }
 
 func (m *MetricsPipeline) run() (string, error) {
-	var metrics [][]Metric
+	var metrics map[Counter][]Metric
 	var err error
 	var formatted string
 
@@ -167,19 +202,19 @@ func (m *MetricsPipeline) run() (string, error) {
 		/* Collect GPU Metrics */
 		metrics, err = m.gpuCollector.GetMetrics()
 		if err != nil {
-			return "", fmt.Errorf("Failed to collect gpu metrics with error: %v", err)
+			return "", fmt.Errorf("failed to collect gpu metrics; err: %w", err)
 		}
 
 		for _, transform := range m.transformations {
 			err := transform.Process(metrics, m.gpuCollector.SysInfo)
 			if err != nil {
-				return "", fmt.Errorf("Failed to transform metrics for transform %s: %v", err, transform.Name())
+				return "", fmt.Errorf("failed to transform metrics for transform '%s'; err: %w", transform.Name(), err)
 			}
 		}
 
 		formatted, err = FormatMetrics(m.migMetricsFormat, metrics)
 		if err != nil {
-			return "", fmt.Errorf("Failed to format metrics with error: %v", err)
+			return "", fmt.Errorf("failed to format metrics; err: %w", err)
 		}
 	}
 
@@ -189,7 +224,7 @@ func (m *MetricsPipeline) run() (string, error) {
 		/* Collect Switch Metrics */
 		metrics, err = m.switchCollector.GetMetrics()
 		if err != nil {
-			return "", fmt.Errorf("Failed to collect switch metrics with error: %v", err)
+			return "", fmt.Errorf("failed to collect switch metrics; err: %w", err)
 		}
 
 		if len(metrics) > 0 {
@@ -206,13 +241,13 @@ func (m *MetricsPipeline) run() (string, error) {
 		/* Collect Link Metrics */
 		metrics, err = m.linkCollector.GetMetrics()
 		if err != nil {
-			return "", fmt.Errorf("Failed to collect link metrics with error: %v", err)
+			return "", fmt.Errorf("failed to collect link metrics; err: %w", err)
 		}
 
 		if len(metrics) > 0 {
 			switchFormatted, err := FormatMetrics(m.linkMetricsFormat, metrics)
 			if err != nil {
-				logrus.Warnf("Failed to format link metrics with error: %v", err)
+				logrus.Warnf("failed to format link metrics; err: %v", err)
 			}
 
 			formatted = formatted + switchFormatted
@@ -223,7 +258,7 @@ func (m *MetricsPipeline) run() (string, error) {
 		/* Collect CPU Metrics */
 		metrics, err = m.cpuCollector.GetMetrics()
 		if err != nil {
-			return "", fmt.Errorf("Failed to collect cpu metrics with error: %v", err)
+			return "", fmt.Errorf("failed to collect CPU metrics; err: %w", err)
 		}
 
 		if len(metrics) > 0 {
@@ -240,13 +275,13 @@ func (m *MetricsPipeline) run() (string, error) {
 		/* Collect cpu core Metrics */
 		metrics, err = m.coreCollector.GetMetrics()
 		if err != nil {
-			return "", fmt.Errorf("Failed to collect cpu core metrics with error: %v", err)
+			return "", fmt.Errorf("failed to collect CPU core metrics; err: %w", err)
 		}
 
 		if len(metrics) > 0 {
 			coreFormatted, err := FormatMetrics(m.cpuCoreMetricsFormat, metrics)
 			if err != nil {
-				logrus.Warnf("Failed to format cpu core metrics with error: %v", err)
+				logrus.Warnf("failed to format cpu core metrics; err: %v", err)
 			}
 
 			formatted = formatted + coreFormatted
@@ -272,7 +307,7 @@ var migMetricsFormat = `
 # HELP {{ $counter.FieldName }} {{ $counter.Help }}
 # TYPE {{ $counter.FieldName }} {{ $counter.PromType }}
 {{- range $metric := $metrics }}
-{{ $counter.FieldName }}{gpu="{{ $metric.GPU }}",{{ $metric.UUID }}="{{ $metric.GPUUUID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
+{{ $counter.FieldName }}{gpu="{{ $metric.GPU }}",{{ $metric.UUID }}="{{ $metric.AlterUUID }}",pci_bus_id="{{ $metric.GPUPCIBusID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
 
 {{- range $k, $v := $metric.Labels -}}
 	,{{ $k }}="{{ $v }}"
@@ -357,16 +392,8 @@ var cpuCoreMetricsFormat = `
 {{- end }}
 {{ end }}`
 
-// Template is passed here so that it isn't recompiled at each iteration
-func FormatMetrics(t *template.Template, m [][]Metric) (string, error) {
-	// Group metrics by counter instead of by device
-	groupedMetrics := make(map[*Counter][]Metric)
-	for _, deviceMetrics := range m {
-		for _, deviceMetric := range deviceMetrics {
-			groupedMetrics[deviceMetric.Counter] = append(groupedMetrics[deviceMetric.Counter], deviceMetric)
-		}
-	}
-
+// FormatMetrics Template is passed here so that it isn't recompiled at each iteration
+func FormatMetrics(t *template.Template, groupedMetrics MetricsByCounter) (string, error) {
 	// Format metrics
 	var res bytes.Buffer
 	if err := t.Execute(&res, groupedMetrics); err != nil {
@@ -376,7 +403,7 @@ func FormatMetrics(t *template.Template, m [][]Metric) (string, error) {
 	return res.String(), nil
 }
 
-func FormatSlurmInfo(m [][]Metric) string {
+func FormatSlurmInfo(m MetricsByCounter) string {
 	strJobId := `# HELP nvidia_gpu_jobId JobId number of a job currently using this GPU as reported by Slurm
 # TYPE nvidia_gpu_jobId gauge
 `
@@ -384,12 +411,12 @@ func FormatSlurmInfo(m [][]Metric) string {
 # TYPE nvidia_gpu_jobUid gauge
 `
 	for _, deviceMetrics := range m {
-		jobId := "0"
-		userId := "0"
-		props := ""
 		for _, deviceMetric := range deviceMetrics {
-			if props == "" {
-				props = fmt.Sprintf("{minor_number=\"%s\",name=\"%s\",uuid=\"%s\"} ", deviceMetric.GPU, deviceMetric.GPUModelName, deviceMetric.AlterUUID)
+			jobId := "0"
+			userId := "0"
+			props := fmt.Sprintf("{minor_number=\"%s\",uuid=\"%s\",device=\"%s\",modelName=\"%s\",GPU_I_PROFILE=\"%s\",GPU_I_ID=\"%s\"", deviceMetric.GPU, deviceMetric.AlterUUID, deviceMetric.GPUDevice, deviceMetric.GPUModelName, deviceMetric.MigProfile, deviceMetric.GPUInstanceID)
+			if strings.Contains(strJobId, props) {
+				continue
 			}
 			for k, v := range deviceMetric.Attributes {
 				if k == "jobid" {
@@ -400,11 +427,11 @@ func FormatSlurmInfo(m [][]Metric) string {
 				}
 			}
 			if (jobId != "0") && (userId != "0") {
-				break
+				props += fmt.Sprintf(",jobid=\"%s\",userid=\"%s\"} ", jobId, userId)
+				strJobId += "nvidia_gpu_jobId" + props + jobId + "\n"
+				strUserId += "nvidia_gpu_jobUid" + props + userId + "\n"
 			}
 		}
-		strJobId += "nvidia_gpu_jobId" + props + jobId + "\n"
-		strUserId += "nvidia_gpu_jobUid" + props + userId + "\n"
 	}
 	return strJobId + strUserId
 }

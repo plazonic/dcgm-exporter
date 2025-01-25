@@ -39,6 +39,8 @@ var (
 	namespaceAttribute = "namespace"
 	containerAttribute = "container"
 
+	hpcJobAttribute = "hpc_job"
+
 	oldPodAttribute       = "pod_name"
 	oldNamespaceAttribute = "pod_namespace"
 	oldContainerAttribute = "container_name"
@@ -46,42 +48,8 @@ var (
 	undefinedConfigMapData = "none"
 )
 
-type KubernetesGPUIDType string
-
-const (
-	GPUUID     KubernetesGPUIDType = "uid"
-	DeviceName KubernetesGPUIDType = "device-name"
-)
-
-type DeviceOptions struct {
-	Flex       bool  // If true, then monitor all GPUs if MIG mode is disabled or all GPU instances if MIG is enabled.
-	MajorRange []int // The indices of each GPU/NvSwitch to monitor, or -1 to monitor all
-	MinorRange []int // The indices of each GPUInstance/NvLink to monitor, or -1 to monitor all
-}
-
-type Config struct {
-	CollectorsFile      string
-	Address             string
-	CollectInterval     int
-	Kubernetes          bool
-	KubernetesGPUIdType KubernetesGPUIDType
-	CollectDCP          bool
-	UseOldNamespace     bool
-	UseRemoteHE         bool
-	RemoteHEInfo        string
-	GPUDevices          DeviceOptions
-	SwitchDevices       DeviceOptions
-	CPUDevices          DeviceOptions
-	NoHostname          bool
-	UseFakeGPUs         bool
-	ConfigMapData       string
-	MetricGroups        []dcgm.MetricGroup
-	WebSystemdSocket    bool
-	WebConfigFile       string
-}
-
 type Transform interface {
-	Process(metrics [][]Metric, sysInfo SystemInfo) error
+	Process(metrics MetricsByCounter, sysInfo SystemInfo) error
 	Name() string
 }
 
@@ -104,12 +72,13 @@ type MetricsPipeline struct {
 }
 
 type DCGMCollector struct {
-	Counters        []Counter
-	DeviceFields    []dcgm.Short
-	Cleanups        []func()
-	UseOldNamespace bool
-	SysInfo         SystemInfo
-	Hostname        string
+	Counters                 []Counter
+	DeviceFields             []dcgm.Short
+	Cleanups                 []func()
+	UseOldNamespace          bool
+	SysInfo                  SystemInfo
+	Hostname                 string
+	ReplaceBlanksInModelName bool
 }
 
 type Counter struct {
@@ -123,7 +92,7 @@ type Counter struct {
 }
 
 type Metric struct {
-	Counter    *Counter
+	Counter    Counter
 	Value      string
 	AlterValue string
 	AlterUUID  string
@@ -132,6 +101,7 @@ type Metric struct {
 	GPUUUID      string
 	GPUDevice    string
 	GPUModelName string
+	GPUPCIBusID  string
 
 	UUID string
 
@@ -139,7 +109,7 @@ type Metric struct {
 	GPUInstanceID string
 	Hostname      string
 
-	Labels     *map[string]string
+	Labels     map[string]string
 	Attributes map[string]string
 }
 
@@ -172,6 +142,7 @@ type MetricsServer struct {
 	webConfig   *web.FlagConfig
 	metrics     string
 	metricsChan chan string
+	registry    *Registry
 }
 
 type PodMapper struct {
@@ -182,6 +153,15 @@ type PodInfo struct {
 	Name      string
 	Namespace string
 	Container string
+}
+
+// MetricsByCounter represents a map where each Counter is associated with a slice of Metric objects
+type MetricsByCounter map[Counter][]Metric
+
+// CounterSet return
+type CounterSet struct {
+	DCGMCounters     []Counter
+	ExporterCounters []Counter
 }
 
 type PUSlurmMapper struct {

@@ -18,7 +18,6 @@ package dcgmexporter
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -66,7 +65,7 @@ func FindMIGUUID(sysInfo SystemInfo, gpu string, instanceId string) string {
 	return ""
 }
 
-func (p *PUSlurmMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
+func (p *PUSlurmMapper) Process(metrics MetricsByCounter, sysInfo SystemInfo) error {
 	// e.g. jobiDs["0.4"] = 31212, for GPU#0, MIG nvml instanceid 4, owned by jobid "31212"
 	jobIds := make(map[string]string)
 	// e.g. userIds[1] = 221290, for GPU#1, no MIG, owned by userid "221290"

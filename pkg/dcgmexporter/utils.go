@@ -17,6 +17,8 @@
 package dcgmexporter
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"sync"
 	"time"
@@ -32,6 +34,32 @@ func WaitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) error {
 	case <-c:
 		return nil
 	case <-time.After(timeout):
-		return fmt.Errorf("Timeout waiting for WaitGroup")
+		return fmt.Errorf("timeout waiting for WaitGroup")
 	}
+}
+
+func deepCopy[T any](src T) (dst T, err error) {
+	var buf bytes.Buffer
+
+	defer func() {
+		if r := recover(); r != nil {
+			// If there was a panic, return the zero value of T and the error.
+			dst = *new(T)
+			err = fmt.Errorf("panic occurred: %v", r)
+		}
+	}()
+
+	// Create an encoder and send a value.
+	err = gob.NewEncoder(&buf).Encode(src)
+	if err != nil {
+		return *new(T), err
+	}
+
+	// Create a new instance of the type T and decode into that.
+	err = gob.NewDecoder(&buf).Decode(&dst)
+	if err != nil {
+		return *new(T), err
+	}
+
+	return dst, nil
 }

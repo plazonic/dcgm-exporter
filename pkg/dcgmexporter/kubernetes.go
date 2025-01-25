@@ -20,21 +20,20 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/dcgm-exporter/internal/pkg/nvmlprovider"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	podresourcesapi "k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
+
+	"github.com/NVIDIA/dcgm-exporter/internal/pkg/nvmlprovider"
 )
 
 var (
-	socketDir  = "/var/lib/kubelet/pod-resources"
-	socketPath = socketDir + "/kubelet.sock"
-
 	connectionTimeout = 10 * time.Second
 
 	gkeMigDeviceIDRegex            = regexp.MustCompile(`^nvidia([0-9]+)/gi([0-9]+)$`)
@@ -54,10 +53,11 @@ func (p *PodMapper) Name() string {
 	return "podMapper"
 }
 
-func (p *PodMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
+func (p *PodMapper) Process(metrics MetricsByCounter, sysInfo SystemInfo) error {
+	socketPath := p.Config.PodResourcesKubeletSocket
 	_, err := os.Stat(socketPath)
 	if os.IsNotExist(err) {
-		logrus.Infof("No Kubelet socket, ignoring")
+		logrus.Info("No Kubelet socket, ignoring")
 		return nil
 	}
 
@@ -75,22 +75,28 @@ func (p *PodMapper) Process(metrics [][]Metric, sysInfo SystemInfo) error {
 
 	deviceToPod := p.toDeviceToPod(pods, sysInfo)
 
+	logrus.Debugf("Device to pod mapping: %+v", deviceToPod)
+
 	// Note: for loop are copies the value, if we want to change the value
 	// and not the copy, we need to use the indexes
-	for i, device := range metrics {
-		for j, val := range device {
+	for counter := range metrics {
+		for j, val := range metrics[counter] {
 			deviceID, err := val.getIDOfType(p.Config.KubernetesGPUIdType)
 			if err != nil {
 				return err
 			}
-			if !p.Config.UseOldNamespace {
-				metrics[i][j].Attributes[podAttribute] = deviceToPod[deviceID].Name
-				metrics[i][j].Attributes[namespaceAttribute] = deviceToPod[deviceID].Namespace
-				metrics[i][j].Attributes[containerAttribute] = deviceToPod[deviceID].Container
-			} else {
-				metrics[i][j].Attributes[oldPodAttribute] = deviceToPod[deviceID].Name
-				metrics[i][j].Attributes[oldNamespaceAttribute] = deviceToPod[deviceID].Namespace
-				metrics[i][j].Attributes[oldContainerAttribute] = deviceToPod[deviceID].Container
+
+			podInfo, exists := deviceToPod[deviceID]
+			if exists {
+				if !p.Config.UseOldNamespace {
+					metrics[counter][j].Attributes[podAttribute] = podInfo.Name
+					metrics[counter][j].Attributes[namespaceAttribute] = podInfo.Namespace
+					metrics[counter][j].Attributes[containerAttribute] = podInfo.Container
+				} else {
+					metrics[counter][j].Attributes[oldPodAttribute] = podInfo.Name
+					metrics[counter][j].Attributes[oldNamespaceAttribute] = podInfo.Namespace
+					metrics[counter][j].Attributes[oldContainerAttribute] = podInfo.Container
+				}
 			}
 		}
 	}
@@ -102,14 +108,17 @@ func connectToServer(socket string) (*grpc.ClientConn, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectionTimeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, socket, grpc.WithInsecure(), grpc.WithBlock(),
-		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
-			return net.DialTimeout("unix", addr, timeout)
+	conn, err := grpc.DialContext(ctx,
+		socket,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			d := net.Dialer{}
+			return d.DialContext(ctx, "unix", addr)
 		}),
 	)
-
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("failure connecting to %s: %v", socket, err)
+		return nil, func() {}, fmt.Errorf("failure connecting to '%s'; err: %w", socket, err)
 	}
 
 	return conn, func() { conn.Close() }, nil
@@ -123,13 +132,15 @@ func (p *PodMapper) listPods(conn *grpc.ClientConn) (*podresourcesapi.ListPodRes
 
 	resp, err := client.List(ctx, &podresourcesapi.ListPodResourcesRequest{})
 	if err != nil {
-		return nil, fmt.Errorf("failure getting pod resources %v", err)
+		return nil, fmt.Errorf("failure getting pod resources; err: %w", err)
 	}
 
 	return resp, nil
 }
 
-func (p *PodMapper) toDeviceToPod(devicePods *podresourcesapi.ListPodResourcesResponse, sysInfo SystemInfo) map[string]PodInfo {
+func (p *PodMapper) toDeviceToPod(
+	devicePods *podresourcesapi.ListPodResourcesResponse, sysInfo SystemInfo,
+) map[string]PodInfo {
 	deviceToPodMap := make(map[string]PodInfo)
 
 	for _, pod := range devicePods.GetPodResources() {
@@ -137,7 +148,7 @@ func (p *PodMapper) toDeviceToPod(devicePods *podresourcesapi.ListPodResourcesRe
 			for _, device := range container.GetDevices() {
 
 				resourceName := device.GetResourceName()
-				if resourceName != nvidiaResourceName {
+				if resourceName != nvidiaResourceName && !slices.Contains(p.Config.NvidiaResourceNames, resourceName) {
 					// Mig resources appear differently than GPU resources
 					if !strings.HasPrefix(resourceName, nvidiaMigResourcePrefix) {
 						continue
@@ -154,7 +165,8 @@ func (p *PodMapper) toDeviceToPod(devicePods *podresourcesapi.ListPodResourcesRe
 					if strings.HasPrefix(deviceID, MIG_UUID_PREFIX) {
 						migDevice, err := nvmlGetMIGDeviceInfoByIDHook(deviceID)
 						if err == nil {
-							giIdentifier := GetGPUInstanceIdentifier(sysInfo, migDevice.ParentUUID, uint(migDevice.GPUInstanceID))
+							giIdentifier := GetGPUInstanceIdentifier(sysInfo, migDevice.ParentUUID,
+								uint(migDevice.GPUInstanceID))
 							deviceToPodMap[giIdentifier] = podInfo
 						}
 						gpuUUID := deviceID[len(MIG_UUID_PREFIX):]

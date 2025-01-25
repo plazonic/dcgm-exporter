@@ -21,6 +21,7 @@ import (
 	"math/rand"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
+	"github.com/sirupsen/logrus"
 )
 
 func NewGroup() (dcgm.GroupHandle, func(), error) {
@@ -29,7 +30,12 @@ func NewGroup() (dcgm.GroupHandle, func(), error) {
 		return dcgm.GroupHandle{}, func() {}, err
 	}
 
-	return group, func() { dcgm.DestroyGroup(group) }, nil
+	return group, func() {
+		err := dcgm.DestroyGroup(group)
+		if err != nil {
+			logrus.WithError(err).Warn("Cannot destroy field group.")
+		}
+	}, nil
 }
 
 func NewDeviceFields(counters []Counter, entityType dcgm.Field_Entity_Group) []dcgm.Short {
@@ -56,10 +62,17 @@ func NewFieldGroup(deviceFields []dcgm.Short) (dcgm.FieldHandle, func(), error) 
 		return dcgm.FieldHandle{}, func() {}, err
 	}
 
-	return fieldGroup, func() { dcgm.FieldGroupDestroy(fieldGroup) }, nil
+	return fieldGroup, func() {
+		err := dcgm.FieldGroupDestroy(fieldGroup)
+		if err != nil {
+			logrus.WithError(err).Warn("Cannot destroy field group.")
+		}
+	}, nil
 }
 
-func WatchFieldGroup(group dcgm.GroupHandle, field dcgm.FieldHandle, updateFreq int64, maxKeepAge float64, maxKeepSamples int32) error {
+func WatchFieldGroup(
+	group dcgm.GroupHandle, field dcgm.FieldHandle, updateFreq int64, maxKeepAge float64, maxKeepSamples int32,
+) error {
 	err := dcgm.WatchFieldsWithGroupEx(field, group, updateFreq, maxKeepAge, maxKeepSamples)
 	if err != nil {
 		return err
@@ -68,7 +81,7 @@ func WatchFieldGroup(group dcgm.GroupHandle, field dcgm.FieldHandle, updateFreq 
 	return nil
 }
 
-func SetupDcgmFieldsWatch(deviceFields []dcgm.Short, sysInfo SystemInfo, collectIntervalUsec int64) ([]func(), error) {
+func SetupDcgmFieldsWatch(deviceFields []dcgm.Short, sysInfo SystemInfo, collectIntervalUsec int64) ([]dcgm.GroupHandle, dcgm.FieldHandle, []func(), error) {
 	var err error
 	var cleanups []func()
 	var cleanup func()
@@ -107,12 +120,12 @@ func SetupDcgmFieldsWatch(deviceFields []dcgm.Short, sysInfo SystemInfo, collect
 		}
 	}
 
-	return cleanups, nil
+	return groups, fieldGroup, cleanups, nil
 
 fail:
 	for _, f := range cleanups {
 		f()
 	}
 
-	return nil, err
+	return nil, dcgm.FieldHandle{}, nil, err
 }

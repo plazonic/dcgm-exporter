@@ -12,31 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-MKDIR    ?= mkdir
-REGISTRY ?= nvidia
+include hack/VERSION
 
-DCGM_VERSION   := 3.3.3
-GOLANG_VERSION := 1.21.5
-VERSION        := 3.3.1
+REGISTRY             ?= nvidia
+GO                   ?= go
+MKDIR                ?= mkdir
+GOLANGCILINT_TIMEOUT ?= 10m
+
+DCGM_VERSION   := $(NEW_DCGM_VERSION)
+GOLANG_VERSION := 1.22.5
+VERSION        := $(NEW_EXPORTER_VERSION)
 FULL_VERSION   := $(DCGM_VERSION)-$(VERSION)
-OUTPUT         := type=oci,dest=/tmp/dcgm-exporter.tar
+OUTPUT         := type=oci,dest=/dev/null
 PLATFORMS      := linux/amd64,linux/arm64
 DOCKERCMD      := docker buildx build
+MODULE         := github.com/NVIDIA/dcgm-exporter
 
-NON_TEST_FILES  := pkg/dcgmexporter/dcgm.go pkg/dcgmexporter/gpu_collector.go pkg/dcgmexporter/parser.go
-NON_TEST_FILES  += pkg/dcgmexporter/pipeline.go pkg/dcgmexporter/server.go pkg/dcgmexporter/system_info.go
-NON_TEST_FILES  += pkg/dcgmexporter/types.go pkg/dcgmexporter/utils.go pkg/dcgmexporter/kubernetes.go
-NON_TEST_FILES  += cmd/dcgm-exporter/main.go
-MAIN_TEST_FILES := pkg/dcgmexporter/system_info_test.go
 
 .PHONY: all binary install check-format local
-all: ubuntu22.04 ubi9
+all: update-version ubuntu22.04 ubi9
 
-binary:
-	cd cmd/dcgm-exporter; go build -ldflags "-X main.BuildVersion=${DCGM_VERSION}-${VERSION}"
+binary: generate update-version
+	cd cmd/dcgm-exporter; $(GO) build -ldflags "-X main.BuildVersion=${DCGM_VERSION}-${VERSION}"
 
-test-main: $(NON_TEST_FILES) $(MAIN_TEST_FILES)
-	go test ./... -short
+test-main:
+	$(GO) test ./... -short
 
 install: binary
 	install -m 755 cmd/dcgm-exporter/dcgm-exporter /usr/bin/dcgm-exporter
@@ -47,7 +47,7 @@ check-format:
 	test $$(gofmt -l pkg | tee /dev/stderr | wc -l) -eq 0
 	test $$(gofmt -l cmd | tee /dev/stderr | wc -l) -eq 0
 
-push:
+push: update-version
 	$(MAKE) ubuntu22.04 OUTPUT=type=registry
 	$(MAKE) ubi9 OUTPUT=type=registry
 
@@ -58,32 +58,32 @@ else
 	$(MAKE) PLATFORMS=linux/amd64 OUTPUT=type=docker DOCKERCMD='docker build'
 endif
 
-ubuntu22.04:
-	$(DOCKERCMD) --pull \
-		--output $(OUTPUT) \
-		--platform $(PLATFORMS) \
-		--build-arg "GOLANG_VERSION=$(GOLANG_VERSION)" \
-		--build-arg "DCGM_VERSION=$(DCGM_VERSION)" \
-		--tag "$(REGISTRY)/dcgm-exporter:$(FULL_VERSION)-ubuntu22.04" \
-		--file docker/Dockerfile.ubuntu22.04 .
+TARGETS = ubuntu22.04 ubi9
 
-ubi9:
+DOCKERFILE.ubuntu22.04 = docker/Dockerfile.ubuntu22.04
+DOCKERFILE.ubi9 = docker/Dockerfile.ubi9
+
+$(TARGETS):
 	$(DOCKERCMD) --pull \
 		--output $(OUTPUT) \
 		--platform $(PLATFORMS) \
 		--build-arg "GOLANG_VERSION=$(GOLANG_VERSION)" \
 		--build-arg "DCGM_VERSION=$(DCGM_VERSION)" \
-		--build-arg "VERSION=$(FULL_VERSION)" \
-		--tag "$(REGISTRY)/dcgm-exporter:$(FULL_VERSION)-ubi9" \
-		--file docker/Dockerfile.ubi9 .
+		--build-arg "VERSION=$(VERSION)" \
+		--tag "$(REGISTRY)/dcgm-exporter:$(FULL_VERSION)-$@" \
+		--file $(DOCKERFILE.$@) .
 
 .PHONY: integration
 test-integration:
 	go test -race -count=1 -timeout 5m -v $(TEST_ARGS) ./tests/integration/
-	
+
+test-coverage:
+	sh scripts/test_coverage.sh
+	gocov convert tests.cov  | gocov report
+
 .PHONY: lint
 lint:
-	golangci-lint run ./...
+	golangci-lint run ./... --timeout $(GOLANGCILINT_TIMEOUT)  --new-from-rev=HEAD~1 --fix
 
 .PHONY: validate-modules
 validate-modules:
@@ -92,3 +92,47 @@ validate-modules:
 	@echo "- Checking for any unused/missing packages in go.mod..."
 	go mod tidy
 	@git diff --exit-code -- go.sum go.mod
+
+.PHONY: tools
+tools: ## Install required tools and utilities
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.55.2
+	go install github.com/axw/gocov/gocov@latest
+	go install golang.org/x/tools/cmd/goimports@latest
+	go install mvdan.cc/gofumpt@latest
+
+fmt:
+	find . -name '*.go' | xargs gofumpt -l -w
+
+goimports:
+	go list -f {{.Dir}} $(MODULE)/... \
+		| xargs goimports -local $(MODULE) -w
+
+check-fmt:
+	@echo "Checking code formatting.  Any listed files don't match goimports:"
+	! (find . -iname "*.go" \
+		| xargs goimports -l -local $(MODULE) | grep .)
+
+.PHONY: e2e-test
+e2e-test:
+	cd tests/e2e && make e2e-test
+
+# Command for in-place substitution
+SED_CMD := sed -i$(shell uname -s | grep -q Darwin && echo " ''")
+
+# Create list of paths to YAML, README.md, and Makefile files
+FILE_PATHS := $(shell find . -type f \( -name "*.yaml" -o -name "README.md" -o -name "Makefile" \))
+
+# Replace the old version with the new version in specified files
+update-version:
+	@echo "Updating DCGM version in files from $(OLD_DCGM_VERSION) to $(NEW_DCGM_VERSION)..."
+	@$(foreach file,$(FILE_PATHS),$(SED_CMD) "s/$(OLD_DCGM_VERSION)/$(NEW_DCGM_VERSION)/g" $(file);)
+	@echo "Updating DCGM Exporter version in files from $(OLD_EXPORTER_VERSION) to $(NEW_EXPORTER_VERSION)..."
+	@$(foreach file,$(FILE_PATHS),$(SED_CMD) "s/$(OLD_EXPORTER_VERSION)/$(NEW_EXPORTER_VERSION)/g" $(file);)
+
+# Update DCGM and DCGM Exporter versions
+update-versions: update-version
+
+.PHONY: generate
+# Generate code (Mocks)
+generate:
+	go generate ./...

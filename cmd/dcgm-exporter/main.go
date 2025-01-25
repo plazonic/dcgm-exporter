@@ -19,8 +19,11 @@ package main
 import (
 	"os"
 
-	"github.com/NVIDIA/dcgm-exporter/pkg/cmd"
 	"github.com/sirupsen/logrus"
+
+	_ "go.uber.org/automaxprocs"
+
+	"github.com/NVIDIA/dcgm-exporter/pkg/cmd"
 )
 
 var (

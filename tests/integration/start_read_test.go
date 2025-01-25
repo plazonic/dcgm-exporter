@@ -25,10 +25,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/dcgm-exporter/pkg/cmd"
 	"github.com/avast/retry-go/v4"
 	"github.com/prometheus/common/expfmt"
 	"github.com/stretchr/testify/require"
+
+	"github.com/NVIDIA/dcgm-exporter/pkg/cmd"
 )
 
 func TestStartAndReadMetrics(t *testing.T) {
@@ -42,7 +43,8 @@ func TestStartAndReadMetrics(t *testing.T) {
 	args = append(args, fmt.Sprintf("-a=:%d", port))
 	ctx, cancel := context.WithCancel(context.Background())
 	go func(ctx context.Context) {
-		app.Run(args)
+		err := app.Run(args)
+		require.NoError(t, err)
 	}(ctx)
 
 	t.Log("The dcgm-exporter is running, we wait for 30 seconds to read metrics")

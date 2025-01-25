@@ -1,10 +1,9 @@
 package dcgmexporter
 
 import (
-	"io/ioutil"
-	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -100,14 +99,39 @@ func TestInvalidConfigMapNamespace(t *testing.T) {
 }
 
 func TestExtractCounters(t *testing.T) {
-	tmpFile, err := ioutil.TempFile(os.TempDir(), "prefix-")
+	tests := []struct {
+		name  string
+		field string
+		valid bool
+	}{
+		{
+			name:  "Valid Input DCGM_FI_DEV_GPU_TEMP",
+			field: "DCGM_FI_DEV_GPU_TEMP, gauge, temperature\n",
+			valid: true,
+		},
+		{
+			name:  "Invalid Input DCGM_EXP_XID_ERRORS_COUNTXXX",
+			field: "DCGM_EXP_XID_ERRORS_COUNTXXX, gauge, temperature\n",
+			valid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extractCountersHelper(t, tt.field, tt.valid)
+		})
+	}
+}
+
+func extractCountersHelper(t *testing.T, input string, valid bool) {
+	tmpFile, err := os.CreateTemp(os.TempDir(), "prefix-")
 	if err != nil {
 		t.Fatalf("Cannot create temporary file: %v", err)
 	}
 
 	defer os.Remove(tmpFile.Name())
 
-	text := []byte("DCGM_FI_DEV_GPU_TEMP, gauge, temperature\n")
+	text := []byte(input)
 	if _, err = tmpFile.Write(text); err != nil {
 		t.Fatalf("Failed to write to temporary file: %v", err)
 	}
@@ -122,8 +146,12 @@ func TestExtractCounters(t *testing.T) {
 		ConfigMapData:  undefinedConfigMapData,
 		CollectorsFile: tmpFile.Name(),
 	}
-	records, err := ExtractCounters(&c)
-	if len(records) != 1 || err != nil {
-		t.Fatalf("Should have succeeded: records (%d != 1) err=%v", len(records), err)
+	cc, err := GetCounterSet(&c)
+	if valid {
+		assert.NoError(t, err, "Expected no error.")
+		assert.Equal(t, 1, len(cc.DCGMCounters), "Expected 1 record counters.")
+	} else {
+		assert.Error(t, err, "Expected error.")
+		assert.Nil(t, cc, "Expected no counters.")
 	}
 }

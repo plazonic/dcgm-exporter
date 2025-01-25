@@ -18,9 +18,11 @@ package dcgmexporter
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,8 +32,18 @@ var sampleCounters = []Counter{
 	{dcgm.DCGM_FI_DEV_POWER_USAGE, "DCGM_FI_DEV_POWER_USAGE", "gauge", "Power help info"},
 	{dcgm.DCGM_FI_DRIVER_VERSION, "DCGM_FI_DRIVER_VERSION", "label", "Driver version"},
 	/* test that switch and link metrics are filtered out automatically when devices are not detected */
-	{dcgm.DCGM_FI_DEV_NVSWITCH_TEMPERATURE_CURRENT, "DCGM_FI_DEV_NVSWITCH_TEMPERATURE_CURRENT", "gauge", "switch temperature"},
-	{dcgm.DCGM_FI_DEV_NVSWITCH_LINK_FLIT_ERRORS, "DCGM_FI_DEV_NVSWITCH_LINK_FLIT_ERRORS", "gauge", "per-link flit errors"},
+	{
+		dcgm.DCGM_FI_DEV_NVSWITCH_TEMPERATURE_CURRENT,
+		"DCGM_FI_DEV_NVSWITCH_TEMPERATURE_CURRENT",
+		"gauge",
+		"switch temperature",
+	},
+	{
+		dcgm.DCGM_FI_DEV_NVSWITCH_LINK_FLIT_ERRORS,
+		"DCGM_FI_DEV_NVSWITCH_LINK_FLIT_ERRORS",
+		"gauge",
+		"per-link flit errors",
+	},
 	/* test that vgpu metrics are not filtered out */
 	{dcgm.DCGM_FI_DEV_VGPU_LICENSE_STATUS, "DCGM_FI_DEV_VGPU_LICENSE_STATUS", "gauge", "vgpu license status"},
 	/* test that cpu and cpu core metrics are filtered out automatically when devices are not detected */
@@ -62,12 +74,17 @@ func TestDCGMCollector(t *testing.T) {
 }
 
 func testDCGMGPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, func()) {
-	dOpt := DeviceOptions{true, []int{-1}, []int{-1}}
-	cfg := Config{
+	dOpt := DeviceOptions{
+		Flex:       true,
+		MajorRange: []int{-1},
+		MinorRange: []int{-1},
+	}
+	config := Config{
 		GPUDevices:      dOpt,
 		NoHostname:      false,
 		UseOldNamespace: false,
 		UseFakeGPUs:     false,
+		CollectInterval: 1,
 	}
 
 	dcgmGetAllDeviceCount = func() (uint, error) {
@@ -78,6 +95,9 @@ func testDCGMGPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 		dev := dcgm.Device{
 			GPU:  0,
 			UUID: fmt.Sprintf("fake%d", gpuId),
+			PCI: dcgm.PCIInfo{
+				BusID: "00000000:0000:0000.0",
+			},
 		}
 
 		return dev, nil
@@ -90,7 +110,9 @@ func testDCGMGPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 		return hierarchy, nil
 	}
 
-	dcgmAddEntityToGroup = func(groupId dcgm.GroupHandle, entityGroupId dcgm.Field_Entity_Group, entityId uint) (err error) {
+	dcgmAddEntityToGroup = func(
+		groupId dcgm.GroupHandle, entityGroupId dcgm.Field_Entity_Group, entityId uint,
+	) (err error) {
 		return nil
 	}
 
@@ -115,40 +137,55 @@ func testDCGMGPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 		dcgmAddEntityToGroup = dcgm.AddEntityToGroup
 	}()
 
-	g, cleanup, err := NewDCGMCollector(counters, &cfg, dcgm.FE_GPU)
+	fieldEntityGroupTypeSystemInfo := NewEntityGroupTypeSystemInfo(counters, &config)
+
+	err := fieldEntityGroupTypeSystemInfo.Load(dcgm.FE_GPU)
+	require.NoError(t, err)
+
+	gpuItem, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_GPU)
+	require.True(t, exists)
+
+	g, cleanup, err := NewDCGMCollector(counters, "", &config, gpuItem)
 	require.NoError(t, err)
 
 	/* Test for error when no switches are available to monitor. */
-	_, _, err = NewDCGMCollector(counters, &cfg, dcgm.FE_SWITCH)
-	require.Error(t, err)
+	switchItem, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_SWITCH)
+	assert.False(t, exists, "dcgm.FE_SWITCH should not be available")
+
+	_, _, err = NewDCGMCollector(counters, "", &config, switchItem)
+	require.Error(t, err, "NewDCGMCollector should return error")
 
 	/* Test for error when no cpus are available to monitor. */
-	_, _, err = NewDCGMCollector(counters, &cfg, dcgm.FE_CPU)
-	require.NoError(t, err)
+	cpuItem, exist := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_CPU)
+	require.False(t, exist, "dcgm.FE_CPU should not be available")
+
+	_, _, err = NewDCGMCollector(counters, "", &config, cpuItem)
+	require.Error(t, err, "NewDCGMCollector should return error")
 
 	out, err := g.GetMetrics()
 	require.NoError(t, err)
 	require.Greater(t, len(out), 0, "Check that you have a GPU on this node")
-	require.Len(t, out[0], len(expectedMetrics))
+	require.Len(t, out, len(expectedMetrics))
 
-	for i, dev := range out {
-		seenMetrics := map[string]bool{}
-		for _, metric := range dev {
+	seenMetrics := map[string]bool{}
+	for _, metrics := range out {
+		for _, metric := range metrics {
 			seenMetrics[metric.Counter.FieldName] = true
-			require.Equal(t, metric.GPU, fmt.Sprintf("%d", i))
-
+			require.NotEmpty(t, metric.GPU)
+			require.NotEmpty(t, metric.GPUUUID)
+			require.NotEmpty(t, metric.GPUPCIBusID)
 			require.NotEmpty(t, metric.Value)
 			require.NotEqual(t, metric.Value, FailedToConvert)
 		}
-		require.Equal(t, seenMetrics, expectedMetrics)
 	}
+	require.Equal(t, seenMetrics, expectedMetrics)
 
 	return g, cleanup
 }
 
 func testDCGMCPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, func()) {
 	dOpt := DeviceOptions{true, []int{-1}, []int{-1}}
-	cfg := Config{
+	config := Config{
 		CPUDevices:      dOpt,
 		NoHostname:      false,
 		UseOldNamespace: false,
@@ -164,6 +201,9 @@ func testDCGMCPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 			GPU:           0,
 			DCGMSupported: "No",
 			UUID:          fmt.Sprintf("fake%d", gpuId),
+			PCI: dcgm.PCIInfo{
+				BusID: "00000000:0000:0000.0",
+			},
 		}
 
 		return dev, nil
@@ -176,7 +216,9 @@ func testDCGMCPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 		return hierarchy, nil
 	}
 
-	dcgmAddEntityToGroup = func(groupId dcgm.GroupHandle, entityGroupId dcgm.Field_Entity_Group, entityId uint) (err error) {
+	dcgmAddEntityToGroup = func(
+		groupId dcgm.GroupHandle, entityGroupId dcgm.Field_Entity_Group, entityId uint,
+	) (err error) {
 		return nil
 	}
 
@@ -202,19 +244,31 @@ func testDCGMCPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 	}()
 
 	/* Test that only cpu metrics are collected for cpu entities. */
-	c, cleanup, err := NewDCGMCollector(counters, &cfg, dcgm.FE_CPU)
+
+	fieldEntityGroupTypeSystemInfo := NewEntityGroupTypeSystemInfo(counters, &config)
+	err := fieldEntityGroupTypeSystemInfo.Load(dcgm.FE_CPU)
+	require.NoError(t, err)
+
+	err = fieldEntityGroupTypeSystemInfo.Load(dcgm.FE_CPU)
+	require.NoError(t, err)
+
+	cpuItem, cpuItemExist := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_CPU)
+	require.True(t, cpuItemExist)
+
+	c, cleanup, err := NewDCGMCollector(counters, "", &config, cpuItem)
 	require.NoError(t, err)
 
 	out, err := c.GetMetrics()
 	require.NoError(t, err)
 	require.Greater(t, len(out), 0, "Check that the fake CPU has been registered")
 
-	for i, dev := range out {
+	for _, dev := range out {
 		seenMetrics := map[string]bool{}
 		for _, metric := range dev {
 			seenMetrics[metric.Counter.FieldName] = true
-			require.Equal(t, metric.GPU, fmt.Sprintf("%d", i))
-
+			require.NotEmpty(t, metric.GPU)
+			require.Empty(t, metric.GPUUUID)
+			require.Empty(t, metric.GPUPCIBusID)
 			require.NotEmpty(t, metric.Value)
 			require.NotEqual(t, metric.Value, FailedToConvert)
 		}
@@ -222,4 +276,211 @@ func testDCGMCPUCollector(t *testing.T, counters []Counter) (*DCGMCollector, fun
 	}
 
 	return c, cleanup
+}
+
+func TestToMetric(t *testing.T) {
+	fieldValue := [4096]byte{}
+	fieldValue[0] = 42
+	values := []dcgm.FieldValue_v1{
+		{
+			FieldId:   150,
+			FieldType: dcgm.DCGM_FT_INT64,
+			Value:     fieldValue,
+		},
+	}
+
+	c := []Counter{
+		{
+			FieldID:   150,
+			FieldName: "DCGM_FI_DEV_GPU_TEMP",
+			PromType:  "gauge",
+			Help:      "Temperature Help info",
+		},
+	}
+
+	d := dcgm.Device{
+		UUID: "fake0",
+		Identifiers: dcgm.DeviceIdentifiers{
+			Model: "NVIDIA T400 4GB",
+		},
+		PCI: dcgm.PCIInfo{
+			BusID: "00000000:0000:0000.0",
+		},
+	}
+
+	var instanceInfo *GPUInstanceInfo = nil
+
+	type testCase struct {
+		replaceBlanksInModelName bool
+		expectedGPUModelName     string
+	}
+
+	testCases := []testCase{
+		{
+			replaceBlanksInModelName: true,
+			expectedGPUModelName:     "NVIDIA-T400-4GB",
+		},
+		{
+			replaceBlanksInModelName: false,
+			expectedGPUModelName:     "NVIDIA T400 4GB",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("When replaceBlanksInModelName is %t", tc.replaceBlanksInModelName), func(t *testing.T) {
+			metrics := make(map[Counter][]Metric)
+			ToMetric(metrics, values, c, d, instanceInfo, false, "", tc.replaceBlanksInModelName)
+			assert.Len(t, metrics, 1)
+			// We get metric value with 0 index
+			metricValues := metrics[reflect.ValueOf(metrics).MapKeys()[0].Interface().(Counter)]
+			assert.Equal(t, "42", metricValues[0].Value)
+			assert.Equal(t, tc.expectedGPUModelName, metricValues[0].GPUModelName)
+
+			assert.Equal(t, d.UUID, metricValues[0].GPUUUID)
+			assert.Equal(t, d.PCI.BusID, metricValues[0].GPUPCIBusID)
+		})
+	}
+}
+
+func TestToMetricWhenDCGM_FI_DEV_XID_ERRORSField(t *testing.T) {
+	c := []Counter{
+		{
+			FieldID:   dcgm.DCGM_FI_DEV_XID_ERRORS,
+			FieldName: "DCGM_FI_DEV_GPU_TEMP",
+			PromType:  "gauge",
+			Help:      "Temperature Help info",
+		},
+	}
+
+	d := dcgm.Device{
+		UUID: "fake0",
+		Identifiers: dcgm.DeviceIdentifiers{
+			Model: "NVIDIA T400 4GB",
+		},
+		PCI: dcgm.PCIInfo{
+			BusID: "00000000:0000:0000.0",
+		},
+	}
+
+	var instanceInfo *GPUInstanceInfo = nil
+
+	type testCase struct {
+		name        string
+		fieldValue  byte
+		expectedErr string
+	}
+
+	testCases := []testCase{
+		{
+			name:        "when DCGM_FI_DEV_XID_ERRORS has no error",
+			fieldValue:  0,
+			expectedErr: xidErrCodeToText[0],
+		},
+		{
+			name:        "when DCGM_FI_DEV_XID_ERRORS has known value",
+			fieldValue:  42,
+			expectedErr: xidErrCodeToText[42],
+		},
+		{
+			name:        "when DCGM_FI_DEV_XID_ERRORS has unknown value",
+			fieldValue:  255,
+			expectedErr: unknownErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fieldValue := [4096]byte{}
+			fieldValue[0] = tc.fieldValue
+			values := []dcgm.FieldValue_v1{
+				{
+					FieldId:   dcgm.DCGM_FI_DEV_XID_ERRORS,
+					FieldType: dcgm.DCGM_FT_INT64,
+					Value:     fieldValue,
+				},
+			}
+
+			metrics := make(map[Counter][]Metric)
+			ToMetric(metrics, values, c, d, instanceInfo, false, "", false)
+			assert.Len(t, metrics, 1)
+			// We get metric value with 0 index
+			metricValues := metrics[reflect.ValueOf(metrics).MapKeys()[0].Interface().(Counter)]
+			assert.Equal(t, fmt.Sprint(tc.fieldValue), metricValues[0].Value)
+			assert.Contains(t, metricValues[0].Attributes, "err_code")
+			assert.Equal(t, fmt.Sprint(tc.fieldValue), metricValues[0].Attributes["err_code"])
+			assert.Contains(t, metricValues[0].Attributes, "err_msg")
+			assert.Equal(t, tc.expectedErr, metricValues[0].Attributes["err_msg"])
+
+			assert.Equal(t, d.UUID, metricValues[0].GPUUUID)
+			assert.Equal(t, d.PCI.BusID, metricValues[0].GPUPCIBusID)
+		})
+	}
+}
+
+func TestGPUCollector_GetMetrics(t *testing.T) {
+	teardownTest := setupTest(t)
+	defer teardownTest(t)
+
+	runOnlyWithLiveGPUs(t)
+	// Create fake GPU
+	numGPUs, err := dcgm.GetAllDeviceCount()
+	require.NoError(t, err)
+
+	if numGPUs+1 > dcgm.MAX_NUM_DEVICES {
+		t.Skipf("Unable to add fake GPU with more than %d gpus", dcgm.MAX_NUM_DEVICES)
+	}
+
+	entityList := []dcgm.MigHierarchyInfo{
+		{Entity: dcgm.GroupEntityPair{EntityGroupId: dcgm.FE_GPU}},
+		{Entity: dcgm.GroupEntityPair{EntityGroupId: dcgm.FE_GPU}},
+		{Entity: dcgm.GroupEntityPair{EntityGroupId: dcgm.FE_GPU}},
+	}
+
+	gpuIDs, err := dcgm.CreateFakeEntities(entityList)
+	require.NoError(t, err)
+	require.NotEmpty(t, gpuIDs)
+
+	numGPUs, err = dcgm.GetAllDeviceCount()
+	require.NoError(t, err)
+
+	counters := []Counter{
+		{
+			FieldID:   100,
+			FieldName: "DCGM_FI_DEV_SM_CLOCK",
+			PromType:  "gauge",
+			Help:      "SM clock frequency (in MHz).",
+		},
+	}
+
+	dOpt := DeviceOptions{
+		Flex:       true,
+		MajorRange: []int{-1},
+		MinorRange: []int{-1},
+	}
+	config := Config{
+		GPUDevices:      dOpt,
+		NoHostname:      false,
+		UseOldNamespace: false,
+		UseFakeGPUs:     false,
+	}
+
+	fieldEntityGroupTypeSystemInfo := NewEntityGroupTypeSystemInfo(counters, &config)
+	err = fieldEntityGroupTypeSystemInfo.Load(dcgm.FE_GPU)
+	require.NoError(t, err)
+
+	gpuItem, exists := fieldEntityGroupTypeSystemInfo.Get(dcgm.FE_GPU)
+	require.True(t, exists)
+
+	c, cleanup, err := NewDCGMCollector(counters, "", &config, gpuItem)
+	require.NoError(t, err)
+
+	defer cleanup()
+
+	out, err := c.GetMetrics()
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	values := out[counters[0]]
+
+	require.Equal(t, numGPUs, uint(len(values)))
 }

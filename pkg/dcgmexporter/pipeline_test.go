@@ -17,9 +17,11 @@
 package dcgmexporter
 
 import (
-	"fmt"
-	"os"
+	"errors"
 	"testing"
+
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
 	"github.com/stretchr/testify/require"
@@ -34,7 +36,9 @@ func TestRun(t *testing.T) {
 	defer cleanup()
 
 	p, cleanup, err := NewMetricsPipelineWithGPUCollector(&Config{}, c)
+	require.NoError(t, err)
 	defer cleanup()
+	require.NoError(t, err)
 
 	out, err := p.run()
 	require.NoError(t, err)
@@ -46,12 +50,20 @@ func TestRun(t *testing.T) {
 	t.Logf("Pipeline result is:\n%v", out)
 }
 
-func testNewDCGMCollector(counter *int, enabledCollector map[dcgm.Field_Entity_Group]struct{}) DCGMCollectorConstructor {
-	return func(c []Counter, config *Config, entityType dcgm.Field_Entity_Group) (*DCGMCollector, func(), error) {
+func testNewDCGMCollector(t *testing.T,
+	counter *int, enabledCollector map[dcgm.Field_Entity_Group]struct{},
+) DCGMCollectorConstructor {
+	t.Helper()
+	return func(c []Counter,
+		hostname string,
+		config *Config,
+		fieldEntityGroupTypeSystemInfo FieldEntityGroupTypeSystemInfoItem,
+	) (*DCGMCollector, func(), error) {
 		// should always create GPU Collector
-		if entityType != dcgm.FE_GPU {
-			if _, ok := enabledCollector[entityType]; !ok {
-				return nil, func() {}, fmt.Errorf("%s collector should not be created", entityType)
+		if fieldEntityGroupTypeSystemInfo.SystemInfo.InfoType != dcgm.FE_GPU {
+			if _, ok := enabledCollector[fieldEntityGroupTypeSystemInfo.SystemInfo.InfoType]; !ok {
+				t.Errorf("collector '%s' should not be created", fieldEntityGroupTypeSystemInfo.SystemInfo.InfoType)
+				return nil, func() {}, nil
 			}
 		}
 
@@ -77,58 +89,120 @@ func TestCountPipelineCleanup(t *testing.T) {
 		name             string
 		enabledCollector map[dcgm.Field_Entity_Group]struct{}
 	}{{
-		name:             "only_gpu",
-		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{},
+		name: "only_gpu",
+		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
+			dcgm.FE_GPU: {},
+		},
 	}, {
 		name: "gpu_switch",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_SWITCH: struct{}{},
+			dcgm.FE_SWITCH: {},
 		},
 	}, {
 		name: "gpu_link",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_LINK: struct{}{},
+			dcgm.FE_LINK: {},
 		},
 	}, {
 		name: "gpu_cpu",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_CPU: struct{}{},
+			dcgm.FE_CPU: {},
 		},
 	}, {
 		name: "gpu_core",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_CPU_CORE: struct{}{},
+			dcgm.FE_CPU_CORE: {},
 		},
 	}, {
 		name: "gpu_switch_link",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_SWITCH: struct{}{},
-			dcgm.FE_LINK:   struct{}{},
+			dcgm.FE_SWITCH: {},
+			dcgm.FE_LINK:   {},
 		},
 	}, {
 		name: "gpu_cpu_core",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_CPU:      struct{}{},
-			dcgm.FE_CPU_CORE: struct{}{},
+			dcgm.FE_CPU:      {},
+			dcgm.FE_CPU_CORE: {},
 		},
 	}, {
 		name: "all",
 		enabledCollector: map[dcgm.Field_Entity_Group]struct{}{
-			dcgm.FE_SWITCH:   struct{}{},
-			dcgm.FE_LINK:     struct{}{},
-			dcgm.FE_CPU:      struct{}{},
-			dcgm.FE_CPU_CORE: struct{}{},
+			dcgm.FE_SWITCH:   {},
+			dcgm.FE_LINK:     {},
+			dcgm.FE_CPU:      {},
+			dcgm.FE_CPU_CORE: {},
 		},
 	}} {
-		cleanupCounter := 0
-		_, cleanup, err := NewMetricsPipeline(&Config{
-			Kubernetes:     false,
-			ConfigMapData:  undefinedConfigMapData,
-			CollectorsFile: f.Name(),
-		}, testNewDCGMCollector(&cleanupCounter, c.enabledCollector))
-		require.NoError(t, err, "case: %s failed", c.name)
+		t.Run(c.name, func(t *testing.T) {
+			cleanupCounter := 0
 
-		cleanup()
-		require.Equal(t, len(c.enabledCollector)+1, cleanupCounter, "case: %s failed", c.name)
+			config := &Config{
+				Kubernetes:     false,
+				ConfigMapData:  undefinedConfigMapData,
+				CollectorsFile: f.Name(),
+			}
+
+			cc, err := GetCounterSet(config)
+			if err != nil {
+				logrus.Fatal(err)
+			}
+
+			fieldEntityGroupTypeSystemInfo := NewEntityGroupTypeSystemInfo(cc.DCGMCounters, config)
+
+			for egt := range c.enabledCollector {
+				// We inject system info for unit test purpose
+				fieldEntityGroupTypeSystemInfo.items[egt] = FieldEntityGroupTypeSystemInfoItem{
+					SystemInfo: SystemInfo{
+						InfoType: egt,
+					},
+				}
+			}
+
+			_, cleanup, err := NewMetricsPipeline(config,
+				cc.DCGMCounters,
+				"",
+				testNewDCGMCollector(t, &cleanupCounter, c.enabledCollector),
+				fieldEntityGroupTypeSystemInfo)
+			require.NoError(t, err, "case: %s failed", c.name)
+
+			cleanup()
+			require.Equal(t, len(c.enabledCollector), cleanupCounter, "case: %s failed", c.name)
+		})
 	}
+}
+
+func TestNewMetricsPipelineWhenFieldEntityGroupTypeSystemInfoItemIsEmpty(t *testing.T) {
+	cleanup, err := dcgm.Init(dcgm.Embedded)
+	require.NoError(t, err)
+	defer cleanup()
+
+	config := &Config{}
+
+	fieldEntityGroupTypeSystemInfo := &FieldEntityGroupTypeSystemInfo{
+		items: map[dcgm.Field_Entity_Group]FieldEntityGroupTypeSystemInfoItem{
+			dcgm.FE_GPU:      {},
+			dcgm.FE_SWITCH:   {},
+			dcgm.FE_LINK:     {},
+			dcgm.FE_CPU:      {},
+			dcgm.FE_CPU_CORE: {},
+		},
+	}
+
+	p, cleanup, err := NewMetricsPipeline(config,
+		sampleCounters,
+		"",
+		func(_ []Counter, _ string, _ *Config, item FieldEntityGroupTypeSystemInfoItem) (*DCGMCollector, func(), error) {
+			assert.True(t, item.isEmpty())
+			return nil, func() {}, errors.New("empty")
+		},
+		fieldEntityGroupTypeSystemInfo,
+	)
+	require.NoError(t, err)
+	defer cleanup()
+	require.NoError(t, err)
+
+	out, err := p.run()
+	require.NoError(t, err)
+	require.Empty(t, out)
 }
