@@ -24,7 +24,8 @@ const (
 	uidAttribute       = "pod_uid"
 	vgpuAttribute      = "vgpu"
 
-	hpcJobAttribute = "hpc_job"
+	HpcJobAttribute  = "jobid"
+	HpcUserAttribute = "userid"
 
 	oldPodAttribute       = "pod_name"
 	oldNamespaceAttribute = "pod_namespace"

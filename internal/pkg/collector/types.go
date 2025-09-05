@@ -60,6 +60,8 @@ func (e *EntityCollectorTuple) Collector() Collector {
 type Metric struct {
 	Counter       counters.Counter  `json:"counter"`
 	Value         string            `json:"value"`
+	AlterValue    string            `json:"alter_value"`
+	AlterUUID     string            `json:"alter_uuid"`
 	GPU           string            `json:"gpu"`
 	GPUUUID       string            `json:"gpu_uuid"`
 	GPUDevice     string            `json:"gpu_device"`

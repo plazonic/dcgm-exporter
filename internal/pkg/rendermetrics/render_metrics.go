@@ -19,12 +19,14 @@ package rendermetrics
 import (
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"text/template"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
 
 	"github.com/NVIDIA/dcgm-exporter/internal/pkg/collector"
+	"github.com/NVIDIA/dcgm-exporter/internal/pkg/transformation"
 )
 
 /*
@@ -44,7 +46,7 @@ var (
 # HELP {{ $counter.FieldName }} {{ $counter.Help }}
 # TYPE {{ $counter.FieldName }} {{ $counter.PromType }}
 {{- range $metric := $metrics }}
-{{ $counter.FieldName }}{gpu="{{ $metric.GPU }}",{{ $metric.UUID }}="{{ $metric.GPUUUID }}",pci_bus_id="{{ $metric.GPUPCIBusID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
+{{ $counter.FieldName }}{gpu="{{ $metric.GPU }}",{{ $metric.UUID }}="{{ $metric.AlterUUID }}",pci_bus_id="{{ $metric.GPUPCIBusID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
 
 {{- range $k, $v := $metric.Labels -}}
 	,{{ $k }}="{{ $v }}"
@@ -54,6 +56,22 @@ var (
 {{- end -}}
 
 } {{ $metric.Value -}}
+{{- end }}
+{{- if $counter.AlterFieldName }}
+# HELP {{ $counter.AlterFieldName }} {{ $counter.AlterHelp }}
+# TYPE {{ $counter.AlterFieldName }} {{ $counter.PromType }}
+{{- range $metric := $metrics }}
+{{ $counter.AlterFieldName }}{minor_number="{{ $metric.GPU }}",uuid="{{ $metric.AlterUUID }}",device="{{ $metric.GPUDevice }}",modelName="{{ $metric.GPUModelName }}"{{if $metric.MigProfile}},GPU_I_PROFILE="{{ $metric.MigProfile }}",GPU_I_ID="{{ $metric.GPUInstanceID }}"{{end}}{{if $metric.Hostname }},Hostname="{{ $metric.Hostname }}"{{end}}
+
+{{- range $k, $v := $metric.Labels -}}
+        ,{{ $k }}="{{ $v }}"
+{{- end -}}
+{{- range $k, $v := $metric.Attributes -}}
+        ,{{ $k }}="{{ $v }}"
+{{- end -}}
+
+} {{ $metric.AlterValue -}}
+{{- end }}
 {{- end }}
 {{ end }}`
 
@@ -151,5 +169,41 @@ func RenderGroup(w io.Writer, group dcgm.Field_Entity_Group, metrics collector.M
 	default:
 		return fmt.Errorf("unexpected group: %s", group.String())
 	}
-	return tmpl.Execute(w, metrics)
+	err := tmpl.Execute(w, metrics)
+	if group == dcgm.FE_GPU && err == nil {
+		return RenderSlurm(w, metrics)
+	}
+	return err
+}
+
+func RenderSlurm(w io.Writer, metrics collector.MetricsByCounter) error {
+	strJobId := `# HELP nvidia_gpu_jobId JobId number of a job currently using this GPU as reported by Slurm
+ # TYPE nvidia_gpu_jobId gauge
+`
+	strUserId := `# HELP nvidia_gpu_jobUid Uid number of user running jobs on this GPU
+# TYPE nvidia_gpu_jobUid gauge
+`
+	for _, deviceMetrics := range metrics {
+		for _, deviceMetric := range deviceMetrics {
+			props := fmt.Sprintf("{minor_number=\"%s\",uuid=\"%s\",device=\"%s\",modelName=\"%s\",GPU_I_PROFILE=\"%s\",GPU_I_ID=\"%s\"", deviceMetric.GPU, deviceMetric.AlterUUID, deviceMetric.GPUDevice, deviceMetric.GPUModelName, deviceMetric.MigProfile, deviceMetric.GPUInstanceID)
+			if !strings.Contains(strJobId, props) {
+				jobid := ""
+				userid := ""
+				jobid, _ = deviceMetric.Attributes[transformation.HpcJobAttribute]
+				userid, _ = deviceMetric.Attributes[transformation.HpcUserAttribute]
+				if jobid != "" {
+					props += fmt.Sprintf(",jobid=\"%s\"", jobid)
+					if userid != "" {
+						props += fmt.Sprintf(",userid=\"%s\"} ", userid)
+						strUserId += "nvidia_gpu_jobUid" + props + userid + "\n"
+					} else {
+						props += "} "
+					}
+					strJobId += "nvidia_gpu_jobId" + props + jobid + "\n"
+				}
+			}
+		}
+	}
+	_, err := w.Write([]byte(strJobId + strUserId))
+	return err
 }

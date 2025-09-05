@@ -53,6 +53,7 @@ type GPUInstanceInfo struct {
 	ProfileName      string
 	EntityId         uint
 	ComputeInstances []ComputeInstanceInfo
+	UUID             string
 }
 
 type ComputeInstanceInfo struct {

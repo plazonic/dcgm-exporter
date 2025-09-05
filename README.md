@@ -208,3 +208,33 @@ Following the process will result in any needed CVE being created as well as app
 to the entire DCGM Exporter community. NVIDIA reserves the right to delete vulnerability reports until they're fixed.
 
 Please refer to the policies listed there to answer questions related to reporting security issues.
+
+## Princeton University changes
+In an attempt to replace our modified [nvidia_gpu_exporter](https://github.com/plazonic/nvidia_gpu_prometheus_exporter) the following changes were made to the dcgm exporter.
+### Aliased metrics
+As our current exporter uses differently named metrics, sometimes with different units, e.g. mW vs W for power consumption or bytes instead of megabytes for memory use, added a way to add metrics that are based on metrics already DCGM collects.  To use this feature take a standard metric as defined in default-counters.csv, e.g.:
+```
+DCGM_FI_DEV_FB_TOTAL, gauge, Frame buffer memory total (in MB).
+```
+and append (comma separated) new metric name, its description and multiplier, e.g.:
+```
+DCGM_FI_DEV_FB_TOTAL, gauge, Frame buffer memory total (in MB)., nvidia_gpu_memory_total_bytes, Total memory of the GPU device in bytes, 1048576
+```
+### Collect slurm jobid and user running on the particular GPU
+This feature relies on the existence of /run/gpustat/GPU-UUID (say /run/gpustat/GPU-8b4054a4-c830-20d4-1111-222222222222) or /run/gpustat/MIG-UUID (say /run/gpustat/MIG-2201f4b1-a001-5ae1-87df-c6ef1d8adfab) containing space separated jobid and uidnumber or just jobid, e.g.:
+```
+[root@della-l01g2 ~]# cat /run/gpustat/MIG-2201f4b1-a001-5ae1-87df-c6ef1d8adfab
+51234567 123456
+```
+This information will be appeneded as labels to appropriate metrics, e.g.:
+```
+DCGM_FI_DEV_FB_USED{gpu="0",UUID="GPU-d6dd33b9-e50e-997c-f303-c8f7312fa498",device="nvidia0",modelName="NVIDIA A100 80GB PCIe",GPU_I_PROFILE="1g.10gb",GPU_I_ID="7",Hostname="della-l01g1",DCGM_FI_DRIVER_VERSION="535.104.05",jobid="51234567",userid="123456"} 8543
+```
+as well as added as a separate metrics:
+```
+nvidia_gpu_jobId{minor_number="0",name="NVIDIA A100 80GB PCIe",uuid="GPU-d6dd33b9-e50e-997c-f303-c8f7312fa498"} 51234567
+nvidia_gpu_jobUid{minor_number="0",name="NVIDIA A100 80GB PCIe",uuid="GPU-d6dd33b9-e50e-997c-f303-c8f7312fa498"} 123456
+```
+same as in our previously mentioned nvidia_gpu_exporter.
+
+These last changes rely on hpcjob feature of stock dcgm-exporter but renames it to jobid. You will still have to specify --hpc-job-mapping-dir as /run/gpustat or equivalent.

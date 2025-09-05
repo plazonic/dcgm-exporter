@@ -21,6 +21,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/NVIDIA/go-dcgm/pkg/dcgm"
@@ -84,6 +85,7 @@ func ReadCSVFile(filename string) ([][]string, error) {
 
 	r := csv.NewReader(file)
 	r.Comment = '#'
+	r.FieldsPerRecord = -1 // Allow variable number of fields
 	records, err := r.ReadAll()
 
 	return records, err
@@ -93,6 +95,10 @@ func ExtractCounters(records [][]string, c *appconfig.Config) (*CounterSet, erro
 	res := CounterSet{}
 
 	for i, record := range records {
+		var alterField, alterHelp string
+		var multiplier int
+		var err error
+
 		if len(record) == 0 {
 			continue
 		}
@@ -101,10 +107,23 @@ func ExtractCounters(records [][]string, c *appconfig.Config) (*CounterSet, erro
 			record[j] = strings.Trim(r, " ")
 		}
 
-		if len(record) != 3 {
+		// Local PU addition - for fields with alternate metric name and possibly a multiplier
+		// expects alter_metric_name,alter_descriptoin,multiplier
+		if len(record) == 6 {
+			alterField = record[3]
+			alterHelp = record[4]
+			multiplier, err = strconv.Atoi(record[5])
+			if err != nil {
+				return nil, fmt.Errorf("Malformed CSV record, failed to parse line %d (`%v`), 6th field is not an integer", i, record)
+			}
+		} else if len(record) != 3 {
 			return nil, fmt.Errorf("malformed CSV record; err: failed to parse line %d (`%v`), "+
 				"expected 3 fields", i,
 				record)
+		} else {
+			alterField = ""
+			alterHelp = ""
+			multiplier = 1
 		}
 
 		fieldID, ok := dcgm.GetFieldID(record[0])
@@ -118,10 +137,13 @@ func ExtractCounters(records [][]string, c *appconfig.Config) (*CounterSet, erro
 			} else if expField != DCGMFIUnknown {
 				res.ExporterCounters = append(res.ExporterCounters,
 					Counter{
-						FieldID:   dcgm.Short(expField),
-						FieldName: record[0],
-						PromType:  record[1],
-						Help:      record[2],
+						FieldID:        dcgm.Short(expField),
+						FieldName:      record[0],
+						PromType:       record[1],
+						Help:           record[2],
+						AlterFieldName: alterField,
+						AlterHelp:      alterHelp,
+						Multiplier:     multiplier,
 					})
 				continue
 			}
@@ -137,7 +159,8 @@ func ExtractCounters(records [][]string, c *appconfig.Config) (*CounterSet, erro
 		}
 
 		res.DCGMCounters = append(res.DCGMCounters,
-			Counter{FieldID: fieldID, FieldName: record[0], PromType: record[1], Help: record[2]})
+			Counter{FieldID: fieldID, FieldName: record[0], PromType: record[1], Help: record[2],
+				AlterFieldName: alterField, AlterHelp: alterHelp, Multiplier: multiplier})
 	}
 
 	return &res, nil

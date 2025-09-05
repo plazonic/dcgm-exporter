@@ -120,19 +120,19 @@ func TestHPCProcess(t *testing.T) {
 				})
 				assert.Equal(t, "0", metricValues[0].GPU)
 				assert.Equal(t, "42", metricValues[0].Value)
-				assert.Equal(t, "job1-0", metricValues[0].Attributes[hpcJobAttribute])
+				assert.Equal(t, "job1-0", metricValues[0].Attributes[HpcJobAttribute])
 
 				assert.Equal(t, "1", metricValues[1].GPU)
 				assert.Equal(t, "451", metricValues[1].Value)
-				assert.Equal(t, "job1-1", metricValues[1].Attributes[hpcJobAttribute])
+				assert.Equal(t, "job1-1", metricValues[1].Attributes[HpcJobAttribute])
 
 				assert.Equal(t, "1", metricValues[2].GPU)
 				assert.Equal(t, "451", metricValues[2].Value)
-				assert.Equal(t, "job2-1", metricValues[2].Attributes[hpcJobAttribute])
+				assert.Equal(t, "job2-1", metricValues[2].Attributes[HpcJobAttribute])
 
 				assert.Equal(t, "2", metricValues[3].GPU)
 				assert.Equal(t, "1984", metricValues[3].Value)
-				assert.NotContains(t, metricValues[3].Attributes, hpcJobAttribute)
+				assert.NotContains(t, metricValues[3].Attributes, HpcJobAttribute)
 			},
 		},
 	}
