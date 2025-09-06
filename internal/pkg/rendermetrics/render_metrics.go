@@ -185,7 +185,11 @@ func RenderSlurm(w io.Writer, metrics collector.MetricsByCounter) error {
 `
 	for _, deviceMetrics := range metrics {
 		for _, deviceMetric := range deviceMetrics {
-			props := fmt.Sprintf("{minor_number=\"%s\",uuid=\"%s\",device=\"%s\",modelName=\"%s\",GPU_I_PROFILE=\"%s\",GPU_I_ID=\"%s\"", deviceMetric.GPU, deviceMetric.AlterUUID, deviceMetric.GPUDevice, deviceMetric.GPUModelName, deviceMetric.MigProfile, deviceMetric.GPUInstanceID)
+			hostname := ""
+			if deviceMetric.Hostname != "" {
+				hostname = ",Hostname=\"" + deviceMetric.Hostname + "\""
+			}
+			props := fmt.Sprintf("{minor_number=\"%s\",uuid=\"%s\",device=\"%s\",modelName=\"%s\",GPU_I_PROFILE=\"%s\",GPU_I_ID=\"%s\"%s", deviceMetric.GPU, deviceMetric.AlterUUID, deviceMetric.GPUDevice, deviceMetric.GPUModelName, deviceMetric.MigProfile, deviceMetric.GPUInstanceID, hostname)
 			if !strings.Contains(strJobId, props) {
 				jobid := ""
 				userid := ""
